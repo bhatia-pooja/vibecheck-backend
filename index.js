@@ -46,6 +46,11 @@ function appendLog(entry) {
 }
 
 function checkAndRecordQuota(req) {
+  // Admin bypass — unlimited queries
+  if (req.headers['x-admin-key'] === ADMIN_KEY) {
+    return { allowed: true, admin: true };
+  }
+
   const rawIP = req.headers['x-forwarded-for']?.split(',')[0].trim()
     || req.socket.remoteAddress;
   const id = hashIP(rawIP);
