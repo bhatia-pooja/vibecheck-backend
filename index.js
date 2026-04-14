@@ -5,7 +5,7 @@ import cors from 'cors';
 import { createHash } from 'crypto';
 import { readFileSync, writeFileSync, mkdirSync, appendFileSync } from 'fs';
 import { searchTopPlaces, searchAndGetPlaceDetails, parseQuery, geocodeLocation } from './services/googlePlaces.js';
-import { getRedditReviews, getRedditForVibe } from './services/reddit.js';
+import { searchRedditForVibe, searchRedditForPlace } from './services/braveSearch.js';
 import { synthesizeWithPepper } from './services/claude.js';
 import { textToSpeech } from './services/elevenlabs.js';
 
@@ -307,7 +307,7 @@ app.post('/api/vibe-check', async (req, res) => {
     if (isDiscoveryQuery(intent)) {
       flow = 'discovery';
       console.log(`[discovery] Reddit-first for: "${vibeSearchTerms}"`);
-      const vibeThreads = await getRedditForVibe(vibeSearchTerms);
+      const vibeThreads = await searchRedditForVibe(intent, locationHint, query);
       const redditNames = extractTopMentionedPlaces(vibeThreads, 4);
       console.log(`[discovery] Reddit mentioned: ${redditNames.join(', ') || '(none)'}`);
 
@@ -345,7 +345,7 @@ app.post('/api/vibe-check', async (req, res) => {
       flow = 'specific';
       console.log(`[specific] Google-first for: "${intent}"`);
       candidatePlaces = await searchTopPlaces(intent, lat, lng, 1);
-      redditComments = await getRedditReviews(candidatePlaces[0].name);
+      redditComments = await searchRedditForPlace(candidatePlaces[0].name);
     }
 
     const pepperResponse = await synthesizeWithPepper(query, candidatePlaces, redditComments);
