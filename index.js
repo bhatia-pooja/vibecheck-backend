@@ -298,7 +298,10 @@ app.post('/api/vibe-check', async (req, res) => {
       const extractedPlace = extractTopMentionedPlace(vibeThreads);
       console.log(`[discovery] extracted place: "${extractedPlace}"`);
 
-      const googleQuery = extractedPlace || intent;
+      // Anchor extracted place to the location so Google doesn't pick a global match
+      const googleQuery = extractedPlace
+        ? `${extractedPlace} ${locationHint || ''}`.trim()
+        : intent;
       placeData = await searchAndGetPlaceDetails(googleQuery, lat, lng);
 
       const placeReviews = await getRedditReviews(placeData.name);
