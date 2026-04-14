@@ -10,6 +10,32 @@ const BAY_AREA_RADIUS = 40000; // 40km covers the full Bay Area from SF center
 // Hard radius for "near X" searches — nearbysearch enforces this strictly
 const NEARBY_RADIUS = 4000; // 4km (~2.5 miles)
 
+// Vibe/descriptor words that confuse Google's keyword search
+// (keep food types, place types, neighborhood names)
+const VIBE_WORDS = new Set([
+  'solo', 'cozy', 'hidden', 'gem', 'gems', 'quiet', 'lively', 'cute', 'fancy',
+  'trendy', 'romantic', 'intimate', 'chill', 'vibe', 'vibes', 'perfect', 'best',
+  'good', 'great', 'top', 'amazing', 'awesome', 'spots', 'spot', 'places',
+  'hangout', 'hangouts', 'fun', 'unique', 'cool', 'nice', 'new',
+  'local', 'small', 'tiny', 'popular', 'must', 'worth',
+  'underrated', 'overrated', 'cheap', 'affordable', 'expensive', 'budget',
+  'friendly', 'crowded', 'busy', 'empty', 'spacious', 'cosy',
+  'dinner', 'lunch', 'breakfast', 'brunch',
+]);
+
+/**
+ * Strip vibe/descriptor adjectives so Google gets clean keyword search terms.
+ * Preserves food types, place types, and location words.
+ */
+export function cleanForSearch(intent) {
+  const cleaned = intent
+    .split(/\s+/)
+    .filter((w) => !VIBE_WORDS.has(w.toLowerCase().replace(/[^a-z]/g, '')))
+    .join(' ')
+    .trim();
+  return cleaned || intent;
+}
+
 /**
  * Extract intent + location hint from a user query.
  */
@@ -24,7 +50,12 @@ export function parseQuery(userQuery) {
   }
 
   const nearMatch = q.match(/^(.+?)\s+near\s+(.+)$/i);
-  if (nearMatch) return { intent: nearMatch[1].trim(), locationHint: nearMatch[2].trim() };
+  if (nearMatch) {
+    const loc = nearMatch[2].trim();
+    // "near me" / "near us" = no location hint — caller handles GPS
+    if (/^(me|us|here)$/i.test(loc)) return { intent: nearMatch[1].trim(), locationHint: null };
+    return { intent: nearMatch[1].trim(), locationHint: loc };
+  }
 
   const inMatch = q.match(/^(.+?)\s+in\s+([A-Z][a-zA-Z\s,]+|[a-z]+\s+[A-Z][a-zA-Z\s]+)$/);
   if (inMatch) return { intent: inMatch[1].trim(), locationHint: inMatch[2].trim() };
@@ -127,86 +158,99 @@ async function getPlaceDetails(placeId) {
 }
 
 /**
- * Search for a place matching `intent`, biased around `lat`/`lng`.
- *
- * Strategy:
- * 1. If coordinates provided → Nearby Search (hard radius, 4km). If no results → widen to text search.
- * 2. Validate the top result is actually close to target coords. If way off → retry with location appended.
- * 3. Fallback to Bay Area center (SF) if no coords at all.
+ * Search for and return details for up to `count` top place candidates.
+ * Uses cleaned search keywords + distance filtering.
  */
-export async function searchAndGetPlaceDetails(intent, lat, lng) {
+export async function searchTopPlaces(intent, lat, lng, count = 3) {
   const biasLat = lat ?? BAY_AREA_LAT;
   const biasLng = lng ?? BAY_AREA_LNG;
+
+  const searchKeyword = cleanForSearch(intent);
+  console.log(`[places] search keyword: "${searchKeyword}" (was: "${intent}")`);
 
   let results = [];
 
   if (lat && lng) {
-    // Try hard-radius nearby search first
-    results = await nearbySearch(intent, lat, lng);
-
-    // If nothing within 4km, widen to 15km text search
+    results = await nearbySearch(searchKeyword, lat, lng);
     if (results.length === 0) {
       console.log(`[places] no nearby results within ${NEARBY_RADIUS}m, widening to 15km`);
-      results = await textSearch(intent, lat, lng, 15000);
+      results = await textSearch(searchKeyword, lat, lng, 15000);
     }
   } else {
-    // No coords — use Bay Area wide text search
-    results = await textSearch(intent, biasLat, biasLng, BAY_AREA_RADIUS);
+    results = await textSearch(searchKeyword, biasLat, biasLng, BAY_AREA_RADIUS);
   }
 
   if (!results || results.length === 0) {
     throw new Error('No places found for that query.');
   }
 
-  // Validate top result isn't way off from target
-  let topResult = results[0];
+  // Filter candidates by distance when coordinates are known
+  let candidates;
   if (lat && lng) {
-    const resultLat = topResult.geometry?.location?.lat;
-    const resultLng = topResult.geometry?.location?.lng;
-    if (resultLat && resultLng) {
-      const km = distanceKm(lat, lng, resultLat, resultLng);
-      console.log(`[places] "${topResult.name}" is ${km.toFixed(1)}km from target`);
-
-      // If top result is more than 20km away, try next candidates closer to target
-      if (km > 20) {
-        console.log(`[places] too far — scanning other results`);
-        const closer = results.find((r) => {
-          const rLat = r.geometry?.location?.lat;
-          const rLng = r.geometry?.location?.lng;
-          return rLat && rLng && distanceKm(lat, lng, rLat, rLng) <= 20;
-        });
-        if (closer) {
-          console.log(`[places] found closer result: "${closer.name}"`);
-          topResult = closer;
-        }
-      }
+    const MAX_KM = 20;
+    candidates = results.filter((r) => {
+      const rLat = r.geometry?.location?.lat;
+      const rLng = r.geometry?.location?.lng;
+      if (!rLat || !rLng) return false;
+      const km = distanceKm(lat, lng, rLat, rLng);
+      return km <= MAX_KM;
+    });
+    if (candidates.length === 0) {
+      console.log(`[places] no candidates within ${MAX_KM}km, using top results anyway`);
+      candidates = results;
     }
+  } else {
+    candidates = results;
   }
 
-  const place = await getPlaceDetails(topResult.place_id);
+  candidates = candidates.slice(0, count);
+  console.log(`[places] fetching details for ${candidates.length} candidates`);
 
-  const reviews = (place.reviews || []).slice(0, 5).map((r) => ({
-    source: 'Google',
-    author: r.author_name,
-    rating: r.rating,
-    text: r.text,
-    time: r.relative_time_description,
-  }));
+  // Fetch full details for all candidates in parallel
+  const details = await Promise.all(
+    candidates.map(async (r) => {
+      try {
+        const place = await getPlaceDetails(r.place_id);
+        const reviews = (place.reviews || []).slice(0, 5).map((rv) => ({
+          source: 'Google',
+          author: rv.author_name,
+          rating: rv.rating,
+          text: rv.text,
+          time: rv.relative_time_description,
+        }));
 
-  let photoUrl = null;
-  if (place.photos?.length > 0) {
-    const ref = place.photos[0].photo_reference;
-    photoUrl = `${PLACES_BASE}/photo?maxwidth=800&photoreference=${ref}&key=${process.env.GOOGLE_PLACES_API_KEY}`;
-  }
+        let photoUrl = null;
+        if (place.photos?.length > 0) {
+          const ref = place.photos[0].photo_reference;
+          photoUrl = `${PLACES_BASE}/photo?maxwidth=800&photoreference=${ref}&key=${process.env.GOOGLE_PLACES_API_KEY}`;
+        }
 
-  return {
-    name: place.name,
-    rating: place.rating,
-    address: place.formatted_address,
-    googleUrl: place.url,
-    photoUrl,
-    reviews,
-    lat: place.geometry?.location?.lat,
-    lng: place.geometry?.location?.lng,
-  };
+        return {
+          name: place.name,
+          rating: place.rating,
+          address: place.formatted_address,
+          googleUrl: place.url,
+          photoUrl,
+          reviews,
+          lat: place.geometry?.location?.lat,
+          lng: place.geometry?.location?.lng,
+        };
+      } catch (e) {
+        console.warn(`[places] failed to get details for ${r.place_id}:`, e.message);
+        return null;
+      }
+    })
+  );
+
+  return details.filter(Boolean);
+}
+
+/**
+ * Search for a single place matching `intent`, biased around `lat`/`lng`.
+ * Legacy helper — kept for specific (named place) queries.
+ */
+export async function searchAndGetPlaceDetails(intent, lat, lng) {
+  const places = await searchTopPlaces(intent, lat, lng, 1);
+  if (!places.length) throw new Error('No places found for that query.');
+  return places[0];
 }

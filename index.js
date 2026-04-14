@@ -4,7 +4,7 @@ import express from 'express';
 import cors from 'cors';
 import { createHash } from 'crypto';
 import { readFileSync, writeFileSync, mkdirSync, appendFileSync } from 'fs';
-import { searchAndGetPlaceDetails, parseQuery, geocodeLocation } from './services/googlePlaces.js';
+import { searchTopPlaces, searchAndGetPlaceDetails, parseQuery, geocodeLocation } from './services/googlePlaces.js';
 import { getRedditReviews, getRedditForVibe } from './services/reddit.js';
 import { synthesizeWithPepper } from './services/claude.js';
 import { textToSpeech } from './services/elevenlabs.js';
@@ -293,7 +293,7 @@ app.post('/api/vibe-check', async (req, res) => {
       if (coords) ({ lat, lng } = coords);
     }
 
-    let placeData, redditComments, flow;
+    let candidatePlaces, redditComments, flow;
     const vibeSearchTerms = `${intent}${locationHint ? ` ${locationHint}` : ' bay area'}`;
 
     if (isDiscoveryQuery(intent)) {
@@ -303,13 +303,16 @@ app.post('/api/vibe-check', async (req, res) => {
       const extractedPlace = extractTopMentionedPlace(vibeThreads);
       console.log(`[discovery] extracted place: "${extractedPlace}"`);
 
-      // Anchor extracted place to the location so Google doesn't pick a global match
+      // Use extracted place name if found, otherwise pass intent directly.
+      // Get top 3 candidates so Pepper can pick the best vibe match.
       const googleQuery = extractedPlace
         ? `${extractedPlace} ${locationHint || ''}`.trim()
         : intent;
-      placeData = await searchAndGetPlaceDetails(googleQuery, lat, lng);
+      candidatePlaces = await searchTopPlaces(googleQuery, lat, lng, 3);
+      console.log(`[discovery] candidates: ${candidatePlaces.map((p) => p.name).join(', ')}`);
 
-      const placeReviews = await getRedditReviews(placeData.name);
+      // Fetch Reddit reviews for the top candidate (most likely pick) + merge vibe threads
+      const placeReviews = await getRedditReviews(candidatePlaces[0].name);
       const seenTexts = new Set(placeReviews.map((c) => c.text));
       redditComments = [
         ...placeReviews,
@@ -318,18 +321,24 @@ app.post('/api/vibe-check', async (req, res) => {
     } else {
       flow = 'specific';
       console.log(`[specific] Google-first for: "${intent}"`);
-      placeData = await searchAndGetPlaceDetails(intent, lat, lng);
-      redditComments = await getRedditReviews(placeData.name);
+      candidatePlaces = await searchTopPlaces(intent, lat, lng, 1);
+      redditComments = await getRedditReviews(candidatePlaces[0].name);
     }
 
-    const pepperResponse = await synthesizeWithPepper(query, placeData, redditComments);
+    const pepperResponse = await synthesizeWithPepper(query, candidatePlaces, redditComments);
 
-    const enrichedPlaces = pepperResponse.places.map((p) => ({
-      ...p,
-      photoUrl: placeData.photoUrl,
-      googleUrl: placeData.googleUrl,
-      sources: ['google', ...(redditComments.length > 0 ? ['reddit'] : [])],
-    }));
+    // Match Pepper's chosen place name back to our candidates to get the right photo/URL
+    const enrichedPlaces = pepperResponse.places.map((p) => {
+      const match = candidatePlaces.find(
+        (c) => c.name.toLowerCase() === p.name?.toLowerCase()
+      ) || candidatePlaces[0];
+      return {
+        ...p,
+        photoUrl: match.photoUrl,
+        googleUrl: match.googleUrl,
+        sources: ['google', ...(redditComments.length > 0 ? ['reddit'] : [])],
+      };
+    });
 
     const result = {
       places: enrichedPlaces,
@@ -344,7 +353,7 @@ app.post('/api/vibe-check', async (req, res) => {
       query,
       status: 'ok',
       flow,
-      place: placeData.name,
+      place: candidatePlaces[0]?.name,
       redditCount: redditComments.length,
       durationMs: Date.now() - t0,
       userId: quota.id,

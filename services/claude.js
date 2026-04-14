@@ -1,22 +1,25 @@
 import Anthropic from '@anthropic-ai/sdk';
 
 const PEPPER_SYSTEM_PROMPT = `You are Pepper — a fun, opinionated local friend who always knows the best spots.
-You've been given real reviews from Google and Reddit threads for a place
-(or places) someone is asking about.
+You've been given real reviews from Google and Reddit threads for one or more places
+someone is asking about.
 
 Your job:
 1. First, read the user's query carefully. Pick up on any contextual cues — mood,
    weather, time of day, occasion, energy level, what they're craving, how they're
    feeling. These cues shape your recommendation AND your tone.
-2. Read all the reviews and Reddit comments carefully
-3. Identify the 3-4 recurring themes (e.g., atmosphere, food quality, service speed,
+2. If multiple candidate places are provided, compare them against the user's vibe
+   and pick the ONE that best matches. Don't mention the others — just commit to
+   your pick and explain why it fits.
+3. Read all the reviews and Reddit comments carefully for your chosen place.
+4. Identify the 3-4 recurring themes (e.g., atmosphere, food quality, service speed,
    specific menu items, wifi reliability, noise level, price, parking, crowd type)
-4. For each theme, determine the real consensus — not the average star rating,
+5. For each theme, determine the real consensus — not the average star rating,
    but what people actually keep saying
-5. Pay special attention to Reddit comments — this is where the real, unfiltered
+6. Pay special attention to Reddit comments — this is where the real, unfiltered
    opinions live. Reddit users talk about vibe, crowd, specific menu hacks,
    and practical tips that formal reviews miss.
-6. Synthesize everything into a spoken recommendation that sounds like a friend
+7. Synthesize everything into a spoken recommendation that sounds like a friend
    telling you about the place over text or a voice note
 
 How you read the room:
@@ -65,24 +68,68 @@ Return your response as JSON with NO markdown fencing, just raw JSON:
   "query_type": "discover"
 }`;
 
-export async function synthesizeWithPepper(userQuery, googlePlaceData, redditComments) {
-  const client = new Anthropic();
-  // Send top 3 Google reviews + top 10 Reddit comments (reduces input tokens ~30%)
+/**
+ * Format a single place's data as a block of text for Pepper.
+ */
+function formatPlaceBlock(placeData, redditComments, index, total) {
+  const label = total > 1 ? `CANDIDATE ${index + 1}: ${placeData.name}` : placeData.name;
   const reviewBlock = [
-    '=== GOOGLE REVIEWS ===',
-    ...googlePlaceData.reviews.slice(0, 3).map(
+    `=== ${label} (${placeData.address}) — Google ${placeData.rating}★ ===`,
+    '--- Google Reviews ---',
+    ...placeData.reviews.slice(0, 3).map(
       (r) => `[Google, ${r.rating}★, ${r.time}] ${r.text}`
     ),
-    '',
-    '=== REDDIT COMMENTS ===',
-    ...redditComments.slice(0, 10).map((c) => `[${c.source}] ${c.text}`),
-  ].join('\n');
+  ];
+  if (redditComments && redditComments.length > 0) {
+    reviewBlock.push('--- Reddit Comments ---');
+    reviewBlock.push(...redditComments.slice(0, 8).map((c) => `[${c.source}] ${c.text}`));
+  }
+  return reviewBlock.join('\n');
+}
 
-  const userMessage = `User query: "${userQuery}"
+/**
+ * Ask Pepper to synthesize a vibe check from one or more place candidates.
+ * When multiple candidates are passed, Pepper picks the best vibe match.
+ */
+export async function synthesizeWithPepper(userQuery, placesData, redditComments) {
+  const client = new Anthropic();
 
-Place: ${googlePlaceData.name} (${googlePlaceData.address}) — Google rating: ${googlePlaceData.rating}
+  // Normalize: accept single place object or array
+  const candidates = Array.isArray(placesData) ? placesData : [placesData];
+
+  let userMessage;
+  if (candidates.length === 1) {
+    // Single candidate — original format
+    const reviewBlock = [
+      '=== GOOGLE REVIEWS ===',
+      ...candidates[0].reviews.slice(0, 3).map(
+        (r) => `[Google, ${r.rating}★, ${r.time}] ${r.text}`
+      ),
+      '',
+      '=== REDDIT COMMENTS ===',
+      ...redditComments.slice(0, 10).map((c) => `[${c.source}] ${c.text}`),
+    ].join('\n');
+
+    userMessage = `User query: "${userQuery}"
+
+Place: ${candidates[0].name} (${candidates[0].address}) — Google rating: ${candidates[0].rating}
 
 ${reviewBlock}`;
+  } else {
+    // Multiple candidates — Pepper picks the best vibe match
+    const blocks = candidates.map((p, i) =>
+      formatPlaceBlock(p, redditComments, i, candidates.length)
+    ).join('\n\n');
+
+    userMessage = `User query: "${userQuery}"
+
+You have ${candidates.length} candidate places below. Pick the ONE that best matches the user's vibe and query. Commit to your pick — don't mention the others in your vibe_check_script.
+
+${blocks}
+
+Reddit context (general vibe threads for this query):
+${redditComments.slice(0, 10).map((c) => `[${c.source}] ${c.text}`).join('\n')}`;
+  }
 
   const response = await client.messages.create({
     model: 'claude-sonnet-4-6',
