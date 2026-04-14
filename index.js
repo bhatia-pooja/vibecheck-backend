@@ -83,7 +83,12 @@ function isDiscoveryQuery(intent) {
   return true;
 }
 
-function extractTopMentionedPlace(comments) {
+/**
+ * Extract the top N place names mentioned across Reddit comments.
+ * Names with a business-type signal (ramen, cafe, etc.) score higher.
+ * Returns an array of names sorted by mention frequency.
+ */
+function extractTopMentionedPlaces(comments, count = 4) {
   const text = comments.map((c) => c.text).join('\n');
   const namePattern = /\b(?:[A-Z][a-z']{1,}(?:\s+(?:&\s+)?(?:the\s+)?[A-Z][a-z']{1,}){1,4})\b/g;
   const matches = text.match(namePattern) || [];
@@ -109,7 +114,10 @@ function extractTopMentionedPlace(comments) {
     counts[m] = (counts[m] || 0) + (bizSignal.test(m) ? 2 : 1);
   }
 
-  return Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+  return Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, count)
+    .map(([name]) => name);
 }
 
 // ── Admin dashboard ───────────────────────────────────────────────────────────
@@ -300,24 +308,39 @@ app.post('/api/vibe-check', async (req, res) => {
       flow = 'discovery';
       console.log(`[discovery] Reddit-first for: "${vibeSearchTerms}"`);
       const vibeThreads = await getRedditForVibe(vibeSearchTerms);
-      const extractedPlace = extractTopMentionedPlace(vibeThreads);
-      console.log(`[discovery] extracted place: "${extractedPlace}"`);
+      const redditNames = extractTopMentionedPlaces(vibeThreads, 4);
+      console.log(`[discovery] Reddit mentioned: ${redditNames.join(', ') || '(none)'}`);
 
-      // Use extracted place name if found, otherwise pass intent directly.
-      // Get top 3 candidates so Pepper can pick the best vibe match.
-      const googleQuery = extractedPlace
-        ? `${extractedPlace} ${locationHint || ''}`.trim()
-        : intent;
-      candidatePlaces = await searchTopPlaces(googleQuery, lat, lng, 3);
-      console.log(`[discovery] candidates: ${candidatePlaces.map((p) => p.name).join(', ')}`);
+      if (redditNames.length > 0) {
+        // Source candidates from Reddit — enrich each with Google structured data.
+        // This is the differentiator: pool comes from community recommendations, not Google ranking.
+        const lookups = redditNames.map((name) =>
+          searchTopPlaces(`${name} ${locationHint || ''}`.trim(), lat, lng, 1)
+            .then((r) => r[0] || null)
+            .catch(() => null)
+        );
+        const resolved = await Promise.all(lookups);
+        // Deduplicate by normalized name in case Google resolves two Reddit names to the same place
+        const seen = new Set();
+        candidatePlaces = resolved.filter((p) => {
+          if (!p) return false;
+          const key = p.name.toLowerCase();
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        console.log(`[discovery] Reddit-sourced candidates: ${candidatePlaces.map((p) => p.name).join(', ')}`);
+      }
 
-      // Fetch Reddit reviews for the top candidate (most likely pick) + merge vibe threads
-      const placeReviews = await getRedditReviews(candidatePlaces[0].name);
-      const seenTexts = new Set(placeReviews.map((c) => c.text));
-      redditComments = [
-        ...placeReviews,
-        ...vibeThreads.filter((c) => !seenTexts.has(c.text)),
-      ].slice(0, 20);
+      // Fallback: Reddit found no named places → Google search on the intent
+      if (!candidatePlaces || candidatePlaces.length === 0) {
+        console.log('[discovery] no Reddit names found, falling back to Google search');
+        candidatePlaces = await searchTopPlaces(intent, lat, lng, 3);
+      }
+
+      // Pass the full vibe threads to Pepper as Reddit context — they already contain
+      // the specific mentions and WHY each place was recommended, which is the signal Pepper needs.
+      redditComments = vibeThreads.slice(0, 20);
     } else {
       flow = 'specific';
       console.log(`[specific] Google-first for: "${intent}"`);
