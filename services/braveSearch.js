@@ -75,7 +75,7 @@ function resultsToComments(results) {
     if (text.length < 30) continue;
     const subMatch = r.url.match(/reddit\.com\/r\/([^/]+)/);
     const source = subMatch ? `r/${subMatch[1]}` : 'reddit';
-    comments.push({ source, type: 'search_snippet', text });
+    comments.push({ source, type: 'search_snippet', text, url: r.url, title: r.title });
   }
   return comments;
 }

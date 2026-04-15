@@ -94,13 +94,17 @@ function formatPlaceBlock(placeData, redditComments, index, total) {
  * Ask Pepper to synthesize a vibe check from one or more place candidates.
  * When multiple candidates are passed, Pepper picks the best vibe match.
  */
-export async function synthesizeWithPepper(userQuery, placesData, redditComments) {
+export async function synthesizeWithPepper(userQuery, placesData, redditComments, constraints = []) {
   const client = new Anthropic();
 
   // Normalize: accept single place object or array
   const candidates = Array.isArray(placesData) ? placesData : [placesData];
 
   let userMessage;
+  const constraintBlock = constraints.length
+    ? `\nUser constraints (you MUST address each one — confirm it's met or flag if it isn't):\n${constraints.map((c) => `- ${c.label}`).join('\n')}\n`
+    : '';
+
   if (candidates.length === 1) {
     // Single candidate — original format
     const reviewBlock = [
@@ -113,8 +117,7 @@ export async function synthesizeWithPepper(userQuery, placesData, redditComments
       ...redditComments.slice(0, 10).map((c) => `[${c.source}] ${c.text}`),
     ].join('\n');
 
-    userMessage = `User query: "${userQuery}"
-
+    userMessage = `User query: "${userQuery}"${constraintBlock}
 Place: ${candidates[0].name} (${candidates[0].address}) — Google rating: ${candidates[0].rating}
 
 ${reviewBlock}`;
@@ -124,8 +127,7 @@ ${reviewBlock}`;
       formatPlaceBlock(p, redditComments, i, candidates.length)
     ).join('\n\n');
 
-    userMessage = `User query: "${userQuery}"
-
+    userMessage = `User query: "${userQuery}"${constraintBlock}
 You have ${candidates.length} candidate places below. Pick the ONE that best matches the user's vibe and query. Commit to your pick — don't mention the others in your vibe_check_script.
 
 ${blocks}

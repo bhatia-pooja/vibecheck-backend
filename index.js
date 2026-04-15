@@ -5,6 +5,7 @@ import cors from 'cors';
 import { createHash } from 'crypto';
 import { readFileSync, writeFileSync, mkdirSync, appendFileSync } from 'fs';
 import { searchTopPlaces, searchAndGetPlaceDetails, parseQuery, geocodeLocation } from './services/googlePlaces.js';
+import { extractConstraints, getConstraintRadius } from './services/constraints.js';
 import { searchRedditForVibe, searchRedditForPlace } from './services/braveSearch.js';
 import { synthesizeWithPepper } from './services/claude.js';
 import { textToSpeech } from './services/elevenlabs.js';
@@ -301,6 +302,10 @@ app.post('/api/vibe-check', async (req, res) => {
       if (coords) ({ lat, lng } = coords);
     }
 
+    const constraints = extractConstraints(query);
+    const constraintRadius = getConstraintRadius(constraints);
+    if (constraints.length) console.log(`[constraints] ${constraints.map(c => c.label).join(', ')}`);
+
     let candidatePlaces, redditComments, flow;
     const vibeSearchTerms = `${intent}${locationHint ? ` ${locationHint}` : ' bay area'}`;
 
@@ -308,14 +313,14 @@ app.post('/api/vibe-check', async (req, res) => {
       flow = 'discovery';
       console.log(`[discovery] Reddit-first for: "${vibeSearchTerms}"`);
       const vibeThreads = await searchRedditForVibe(intent, locationHint, query);
-      const redditNames = extractTopMentionedPlaces(vibeThreads, 4);
+      const redditNames = extractTopMentionedPlaces(vibeThreads, 6);
       console.log(`[discovery] Reddit mentioned: ${redditNames.join(', ') || '(none)'}`);
 
       if (redditNames.length > 0) {
         // Source candidates from Reddit — enrich each with Google structured data.
         // This is the differentiator: pool comes from community recommendations, not Google ranking.
         const lookups = redditNames.map((name) =>
-          searchTopPlaces(`${name} ${locationHint || ''}`.trim(), lat, lng, 1)
+          searchTopPlaces(`${name} ${locationHint || ''}`.trim(), lat, lng, 1, constraintRadius)
             .then((r) => r[0] || null)
             .catch(() => null)
         );
@@ -335,7 +340,7 @@ app.post('/api/vibe-check', async (req, res) => {
       // Fallback: Reddit found no named places → Google search on the intent
       if (!candidatePlaces || candidatePlaces.length === 0) {
         console.log('[discovery] no Reddit names found, falling back to Google search');
-        candidatePlaces = await searchTopPlaces(intent, lat, lng, 3);
+        candidatePlaces = await searchTopPlaces(intent, lat, lng, 3, constraintRadius);
       }
 
       // Pass the full vibe threads to Pepper as Reddit context — they already contain
@@ -348,7 +353,15 @@ app.post('/api/vibe-check', async (req, res) => {
       redditComments = await searchRedditForPlace(candidatePlaces[0].name);
     }
 
-    const pepperResponse = await synthesizeWithPepper(query, candidatePlaces, redditComments);
+    // Collect unique Reddit thread sources (URL + subreddit label) for the frontend to display
+    const seenUrls = new Set();
+    const redditSources = redditComments
+      .filter((c) => c.url && c.url.includes('reddit.com'))
+      .filter((c) => { if (seenUrls.has(c.url)) return false; seenUrls.add(c.url); return true; })
+      .slice(0, 5)
+      .map((c) => ({ label: c.source, url: c.url }));
+
+    const pepperResponse = await synthesizeWithPepper(query, candidatePlaces, redditComments, constraints);
 
     // Match Pepper's chosen place name back to our candidates to get the right photo/URL
     const enrichedPlaces = pepperResponse.places.map((p) => {
@@ -367,6 +380,7 @@ app.post('/api/vibe-check', async (req, res) => {
       places: enrichedPlaces,
       vibe_check_script: pepperResponse.vibe_check_script,
       query_type: pepperResponse.query_type,
+      redditSources,
     };
 
     resultCache.set(cacheKey, { data: result, ts: Date.now() });

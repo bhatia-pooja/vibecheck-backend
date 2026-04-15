@@ -112,13 +112,13 @@ function distanceKm(lat1, lng1, lat2, lng2) {
  * Nearby Search — hard radius, only returns places within the circle.
  * Used when we have real coordinates (user specified a location).
  */
-async function nearbySearch(keyword, lat, lng) {
+async function nearbySearch(keyword, lat, lng, radius = NEARBY_RADIUS) {
   const apiKey = process.env.GOOGLE_PLACES_API_KEY;
   const res = await axios.get(`${PLACES_BASE}/nearbysearch/json`, {
     params: {
       keyword,
       location: `${lat},${lng}`,
-      radius: NEARBY_RADIUS,
+      radius,
       rankby: 'prominence',
       key: apiKey,
     },
@@ -161,20 +161,22 @@ async function getPlaceDetails(placeId) {
  * Search for and return details for up to `count` top place candidates.
  * Uses cleaned search keywords + distance filtering.
  */
-export async function searchTopPlaces(intent, lat, lng, count = 3) {
+export async function searchTopPlaces(intent, lat, lng, count = 3, radiusOverride = null) {
   const biasLat = lat ?? BAY_AREA_LAT;
   const biasLng = lng ?? BAY_AREA_LNG;
+  const searchRadius = radiusOverride ?? NEARBY_RADIUS;
 
   const searchKeyword = cleanForSearch(intent);
-  console.log(`[places] search keyword: "${searchKeyword}" (was: "${intent}")`);
+  console.log(`[places] search keyword: "${searchKeyword}" (was: "${intent}") radius: ${searchRadius}m`);
 
   let results = [];
 
   if (lat && lng) {
-    results = await nearbySearch(searchKeyword, lat, lng);
+    results = await nearbySearch(searchKeyword, lat, lng, searchRadius);
     if (results.length === 0) {
-      console.log(`[places] no nearby results within ${NEARBY_RADIUS}m, widening to 15km`);
-      results = await textSearch(searchKeyword, lat, lng, 15000);
+      const widenTo = Math.max(searchRadius * 3, 15000);
+      console.log(`[places] no nearby results within ${searchRadius}m, widening to ${widenTo}m`);
+      results = await textSearch(searchKeyword, lat, lng, widenTo);
     }
   } else {
     results = await textSearch(searchKeyword, biasLat, biasLng, BAY_AREA_RADIUS);
