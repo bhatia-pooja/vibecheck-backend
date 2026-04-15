@@ -5,7 +5,7 @@ import cors from 'cors';
 import { createHash } from 'crypto';
 import { readFileSync, writeFileSync, mkdirSync, appendFileSync } from 'fs';
 import { searchTopPlaces, searchAndGetPlaceDetails, parseQuery, geocodeLocation } from './services/googlePlaces.js';
-import { extractConstraints, getConstraintRadius } from './services/constraints.js';
+import { extractConstraints, getConstraintRadius, getConstraintApiParams, getConstraintKeywordBoosts } from './services/constraints.js';
 import { searchRedditForVibe, searchRedditForPlace } from './services/braveSearch.js';
 import { synthesizeWithPepper } from './services/claude.js';
 import { textToSpeech } from './services/elevenlabs.js';
@@ -303,8 +303,16 @@ app.post('/api/vibe-check', async (req, res) => {
     }
 
     const constraints = extractConstraints(query);
-    const constraintRadius = getConstraintRadius(constraints);
-    if (constraints.length) console.log(`[constraints] ${constraints.map(c => c.label).join(', ')}`);
+    const constraintRadius   = getConstraintRadius(constraints);
+    const constraintApiParams = getConstraintApiParams(constraints);
+    const constraintKeywords  = getConstraintKeywordBoosts(constraints);
+    if (constraints.length) {
+      console.log(`[constraints] ${constraints.map(c => c.label).join(', ')}`);
+      if (Object.keys(constraintApiParams).length)
+        console.log(`[constraints] API params: ${JSON.stringify(constraintApiParams)}`);
+      if (constraintKeywords)
+        console.log(`[constraints] keyword boosts: "${constraintKeywords}"`);
+    }
 
     let candidatePlaces, redditComments, flow;
     const vibeSearchTerms = `${intent}${locationHint ? ` ${locationHint}` : ' bay area'}`;
@@ -318,9 +326,13 @@ app.post('/api/vibe-check', async (req, res) => {
 
       if (redditNames.length > 0) {
         // Source candidates from Reddit — enrich each with Google structured data.
-        // This is the differentiator: pool comes from community recommendations, not Google ranking.
+        // Dietary/feature keyword boosts are passed so Google surfaces matching variants
+        // (e.g. searching "Rangoon Ruby" + "vegetarian" finds the right location).
         const lookups = redditNames.map((name) =>
-          searchTopPlaces(`${name} ${locationHint || ''}`.trim(), lat, lng, 1, constraintRadius)
+          searchTopPlaces(
+            `${name} ${locationHint || ''}`.trim(),
+            lat, lng, 1, constraintRadius, constraintApiParams, constraintKeywords
+          )
             .then((r) => r[0] || null)
             .catch(() => null)
         );
@@ -340,7 +352,9 @@ app.post('/api/vibe-check', async (req, res) => {
       // Fallback: Reddit found no named places → Google search on the intent
       if (!candidatePlaces || candidatePlaces.length === 0) {
         console.log('[discovery] no Reddit names found, falling back to Google search');
-        candidatePlaces = await searchTopPlaces(intent, lat, lng, 3, constraintRadius);
+        candidatePlaces = await searchTopPlaces(
+          intent, lat, lng, 3, constraintRadius, constraintApiParams, constraintKeywords
+        );
       }
 
       // Pass the full vibe threads to Pepper as Reddit context — they already contain
@@ -349,7 +363,9 @@ app.post('/api/vibe-check', async (req, res) => {
     } else {
       flow = 'specific';
       console.log(`[specific] Google-first for: "${intent}"`);
-      candidatePlaces = await searchTopPlaces(intent, lat, lng, 1);
+      candidatePlaces = await searchTopPlaces(
+        intent, lat, lng, 1, constraintRadius, constraintApiParams, constraintKeywords
+      );
       redditComments = await searchRedditForPlace(candidatePlaces[0].name);
     }
 

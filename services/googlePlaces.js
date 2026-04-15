@@ -112,15 +112,19 @@ function distanceKm(lat1, lng1, lat2, lng2) {
  * Nearby Search — hard radius, only returns places within the circle.
  * Used when we have real coordinates (user specified a location).
  */
-async function nearbySearch(keyword, lat, lng, radius = NEARBY_RADIUS) {
+/**
+ * Nearby Search — hard radius, only returns places within the circle.
+ * extraApiParams: any constraint-derived params (opennow, minprice, maxprice).
+ */
+async function nearbySearch(keyword, lat, lng, radius = NEARBY_RADIUS, extraApiParams = {}) {
   const apiKey = process.env.GOOGLE_PLACES_API_KEY;
   const res = await axios.get(`${PLACES_BASE}/nearbysearch/json`, {
     params: {
       keyword,
       location: `${lat},${lng}`,
       radius,
-      rankby: 'prominence',
       key: apiKey,
+      ...extraApiParams,
     },
   });
   return res.data.results || [];
@@ -128,15 +132,16 @@ async function nearbySearch(keyword, lat, lng, radius = NEARBY_RADIUS) {
 
 /**
  * Text Search — bias toward location, wider coverage.
- * Used as fallback or when no precise coordinates available.
+ * extraApiParams: any constraint-derived params (opennow, minprice, maxprice).
  */
-async function textSearch(query, lat, lng, radius) {
+async function textSearch(query, lat, lng, radius, extraApiParams = {}) {
   const apiKey = process.env.GOOGLE_PLACES_API_KEY;
   const params = {
     query,
     key: apiKey,
     location: `${lat},${lng}`,
     radius,
+    ...extraApiParams,
   };
   const res = await axios.get(`${PLACES_BASE}/textsearch/json`, { params });
   return res.data.results || [];
@@ -159,27 +164,49 @@ async function getPlaceDetails(placeId) {
 
 /**
  * Search for and return details for up to `count` top place candidates.
- * Uses cleaned search keywords + distance filtering.
+ * Uses cleaned search keywords + distance filtering + constraint API params.
+ *
+ * @param {string}  intent           - The search intent (food/place type)
+ * @param {number}  lat              - Latitude anchor (null = Bay Area default)
+ * @param {number}  lng              - Longitude anchor
+ * @param {number}  count            - Max candidates to return
+ * @param {number}  radiusOverride   - Override search radius (metres), from distance constraints
+ * @param {object}  extraApiParams   - Extra Google Places params from constraints
+ *                                     e.g. { opennow: true, maxprice: 2 }
+ * @param {string}  keywordBoosts    - Space-separated terms to append to keyword
+ *                                     e.g. "vegetarian" or "vegan patio outdoor"
  */
-export async function searchTopPlaces(intent, lat, lng, count = 3, radiusOverride = null) {
+export async function searchTopPlaces(
+  intent, lat, lng, count = 3,
+  radiusOverride = null,
+  extraApiParams = {},
+  keywordBoosts = '',
+) {
   const biasLat = lat ?? BAY_AREA_LAT;
   const biasLng = lng ?? BAY_AREA_LNG;
   const searchRadius = radiusOverride ?? NEARBY_RADIUS;
 
-  const searchKeyword = cleanForSearch(intent);
-  console.log(`[places] search keyword: "${searchKeyword}" (was: "${intent}") radius: ${searchRadius}m`);
+  const baseKeyword = cleanForSearch(intent);
+  // Append keyword boosts (dietary/feature terms) so Google surfaces matching places.
+  // cleanForSearch strips vibe words but dietary terms are intentional — add them back.
+  const searchKeyword = keywordBoosts
+    ? `${baseKeyword} ${keywordBoosts}`.trim()
+    : baseKeyword;
+
+  console.log(`[places] keyword: "${searchKeyword}" radius: ${searchRadius}m` +
+    (Object.keys(extraApiParams).length ? ` params: ${JSON.stringify(extraApiParams)}` : ''));
 
   let results = [];
 
   if (lat && lng) {
-    results = await nearbySearch(searchKeyword, lat, lng, searchRadius);
+    results = await nearbySearch(searchKeyword, lat, lng, searchRadius, extraApiParams);
     if (results.length === 0) {
       const widenTo = Math.max(searchRadius * 3, 15000);
-      console.log(`[places] no nearby results within ${searchRadius}m, widening to ${widenTo}m`);
-      results = await textSearch(searchKeyword, lat, lng, widenTo);
+      console.log(`[places] no results within ${searchRadius}m, widening to ${widenTo}m`);
+      results = await textSearch(searchKeyword, lat, lng, widenTo, extraApiParams);
     }
   } else {
-    results = await textSearch(searchKeyword, biasLat, biasLng, BAY_AREA_RADIUS);
+    results = await textSearch(searchKeyword, biasLat, biasLng, BAY_AREA_RADIUS, extraApiParams);
   }
 
   if (!results || results.length === 0) {

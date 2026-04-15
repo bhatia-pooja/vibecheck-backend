@@ -29,7 +29,8 @@ export function extractConstraints(query) {
     constraints.push({ type: 'hours', label: 'open late' });
   }
   if (/\bright now\b|\bopen now\b/.test(q)) {
-    constraints.push({ type: 'hours', label: 'open right now' });
+    // opennow=true is a real Google Places API filter — only returns currently open places
+    constraints.push({ type: 'hours', label: 'open right now', apiParams: { opennow: true } });
   }
   if (/\beach\b|\bbefore noon\b|\bmorning\b|\bbreakfast\b/.test(q)) {
     constraints.push({ type: 'hours', label: 'morning hours' });
@@ -49,10 +50,12 @@ export function extractConstraints(query) {
     constraints.push({ type: 'atmosphere', label: 'lively atmosphere' });
   }
   if (/\bdog.friendly\b|\bdogs? (ok|allowed|welcome)\b|\bpet.friendly\b/.test(q)) {
-    constraints.push({ type: 'feature', label: 'dog friendly' });
+    // Appending "dog friendly" to the Google search keyword surfaces dog-friendly venues
+    constraints.push({ type: 'feature', label: 'dog friendly', keywordBoost: 'dog friendly' });
   }
   if (/\boutdoor\b|\bpatio\b|\bterrace\b|\boutside seating\b|\balfresco\b/.test(q)) {
-    constraints.push({ type: 'feature', label: 'outdoor seating' });
+    // "patio" is a strong keyword signal in Google Places — surfaces outdoor venues reliably
+    constraints.push({ type: 'feature', label: 'outdoor seating', keywordBoost: 'patio outdoor' });
   }
   if (/\bparking\b|\bfree parking\b|\bstreet parking\b/.test(q)) {
     constraints.push({ type: 'feature', label: 'parking available' });
@@ -76,19 +79,33 @@ export function extractConstraints(query) {
   }
 
   // ── Budget ────────────────────────────────────────────────────────────────
+  // minprice/maxprice: Google Places uses 0 (free) → 4 (very expensive)
   if (/\bcheap\b|\baffordable\b|\bbudget\b|\binexpensive\b|\bunder \$\d+\b/.test(q)) {
-    constraints.push({ type: 'budget', label: 'budget-friendly' });
+    constraints.push({ type: 'budget', label: 'budget-friendly', apiParams: { maxprice: 2 } });
   }
   if (/\bsplurge\b|\bfancy\b|\bupscale\b|\bfine dining\b|\bspecial occasion\b/.test(q)) {
-    constraints.push({ type: 'budget', label: 'upscale / splurge' });
+    constraints.push({ type: 'budget', label: 'upscale / splurge', apiParams: { minprice: 3 } });
   }
 
   // ── Dietary ───────────────────────────────────────────────────────────────
-  if (/\bvegan\b/.test(q)) constraints.push({ type: 'dietary', label: 'vegan options' });
-  if (/\bvegetarian\b/.test(q)) constraints.push({ type: 'dietary', label: 'vegetarian options' });
-  if (/\bgluten.free\b/.test(q)) constraints.push({ type: 'dietary', label: 'gluten-free options' });
-  if (/\bhalal\b/.test(q)) constraints.push({ type: 'dietary', label: 'halal' });
-  if (/\bkosher\b/.test(q)) constraints.push({ type: 'dietary', label: 'kosher' });
+  // keywordBoost appends the term to the Google Places keyword search.
+  // Google surfaces places with this in their name, description, or category.
+  // Not 100% guaranteed but dramatically improves signal vs. no filter.
+  if (/\bvegan\b/.test(q)) {
+    constraints.push({ type: 'dietary', label: 'vegan options', keywordBoost: 'vegan' });
+  }
+  if (/\bvegetarian\b/.test(q)) {
+    constraints.push({ type: 'dietary', label: 'vegetarian options', keywordBoost: 'vegetarian' });
+  }
+  if (/\bgluten.free\b/.test(q)) {
+    constraints.push({ type: 'dietary', label: 'gluten-free options', keywordBoost: 'gluten free' });
+  }
+  if (/\bhalal\b/.test(q)) {
+    constraints.push({ type: 'dietary', label: 'halal', keywordBoost: 'halal' });
+  }
+  if (/\bkosher\b/.test(q)) {
+    constraints.push({ type: 'dietary', label: 'kosher', keywordBoost: 'kosher' });
+  }
 
   return constraints;
 }
@@ -100,6 +117,31 @@ export function extractConstraints(query) {
 export function getConstraintRadius(constraints) {
   const dist = constraints.find((c) => c.type === 'distance');
   return dist?.radiusM ?? null;
+}
+
+/**
+ * Returns Google Places API params to add directly to the search call.
+ * e.g. { opennow: true } or { maxprice: 2 } or { minprice: 3 }.
+ * Multiple constraints are merged — last one wins on conflicts.
+ */
+export function getConstraintApiParams(constraints) {
+  return constraints.reduce((acc, c) => {
+    if (c.apiParams) Object.assign(acc, c.apiParams);
+    return acc;
+  }, {});
+}
+
+/**
+ * Returns a space-separated string of keyword boosts from dietary/feature constraints.
+ * These are appended to the Google Places keyword/query so the API surfaces
+ * places that explicitly match (e.g. "vegetarian", "halal", "patio outdoor").
+ */
+export function getConstraintKeywordBoosts(constraints) {
+  return constraints
+    .filter((c) => c.keywordBoost)
+    .map((c) => c.keywordBoost)
+    .join(' ')
+    .trim();
 }
 
 /**
